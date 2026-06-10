@@ -1,0 +1,57 @@
+{
+  "dataset": "Mendeley APNEA HRV+SPO2 / HuGCDN2014-OXI",
+  "task": "1-minute apnea vs non-apnea classification",
+  "target": {
+    "0": "non-apnea",
+    "1": "apnea"
+  },
+  "feature_cols": [
+    "rr_interval_mean",
+    "rr_interval_std",
+    "rr_interval_min",
+    "rr_interval_max",
+    "heart_rate_mean",
+    "heart_rate_std",
+    "heart_rate_min",
+    "heart_rate_max",
+    "heart_rate_slope",
+    "sdnn",
+    "rmssd",
+    "pnn50",
+    "spo2_mean",
+    "spo2_std",
+    "spo2_min",
+    "spo2_max",
+    "spo2_slope",
+    "spo2_drop",
+    "spo2_desaturation_count",
+    "spo2_time_below_90",
+    "spo2_time_below_92",
+    "hr_spo2_ratio",
+    "hr_spo2_product"
+  ],
+  "best_model_name": "lightgbm",
+  "split_strategy": "Group split by record_id",
+  "metrics": {
+    "model_name": "lightgbm",
+    "validation_accuracy": 0.8724760892667375,
+    "validation_precision": 0.6929392446633826,
+    "validation_recall": 0.788785046728972,
+    "validation_f1": 0.7377622377622378,
+    "validation_roc_auc": 0.9157549267891347,
+    "validation_specificity": 0.897111416781293,
+    "test_accuracy": 0.9221479004087699,
+    "test_precision": 0.6707818930041153,
+    "test_recall": 0.8681757656458056,
+    "test_f1": 0.7568195008705746,
+    "test_roc_auc": 0.9539972759274973,
+    "test_specificity": 0.9309004534657741
+  },
+  "notes": [
+    "RR folder contains ECG-derived R-R intervals, not respiratory rate.",
+    "SAT folder contains SpO2 / oxygen saturation values.",
+    "LABELS folder contains apnea/non-apnea labels per minute.",
+    "For MAX30102 deployment, ECG-derived RR intervals should be approximated using PPG-derived pulse intervals.",
+    "This model is for research/prototype use and is not a clinical diagnostic tool."
+  ]
+}

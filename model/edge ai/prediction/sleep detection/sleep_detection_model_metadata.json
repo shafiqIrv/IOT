@@ -1,0 +1,43 @@
+{
+  "dataset_id": "abmallick/heart-breath-sleep-stage-dataset",
+  "feature_cols": [
+    "heart_rate",
+    "respiratory_rate",
+    "hr_mean",
+    "hr_sdnn_5",
+    "hr_rmssd_5",
+    "hr_slope_3",
+    "rr_mean",
+    "rr_sd_5",
+    "rr_slope_3",
+    "hr_rr_ratio",
+    "hr_rr_product"
+  ],
+  "best_binary_model_name": "XGBoostClassifier",
+  "best_multiclass_model_name": "RandomForestClassifier",
+  "binary_mapping": {
+    "0": "Not Sleeping",
+    "1": "Sleeping"
+  },
+  "multiclass_mapping": {
+    "0": "Wake",
+    "1": "Light Sleep",
+    "2": "Deep Sleep",
+    "3": "REM"
+  },
+  "sleep_stage_mapping": {
+    "0": "Wake",
+    "1": "N1",
+    "2": "N2",
+    "3": "N3",
+    "5": "REM",
+    "6": "Movement/Artifact",
+    "9": "Unknown/Unscored"
+  },
+  "excluded_sleep_stage_values": [
+    6,
+    9
+  ],
+  "train_sample_max": 300000,
+  "eval_sample_max": 300000
+}

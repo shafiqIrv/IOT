@@ -1,0 +1,23 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./cloud/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  sleep_detection_service:
+    build:
+      context: .
+      dockerfile: cloud/sleep_detection_service/Dockerfile
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_SUBSCRIBE_TOPIC: sensor/+/metrics
+      MQTT_PUBLISH_TOPIC_TEMPLATE: sensor/{deviceId}/inference/sleep
+      SLEEP_MODEL_PATH: /models/sleep_detection_binary_model.joblib
+      SLEEP_FEATURE_COLUMNS_PATH: /models/sleep_detection_feature_columns.joblib
+      SLEEP_WINDOW_SEC: "30"
+      SLEEP_MIN_VALID_SAMPLES: "3"

@@ -1,0 +1,248 @@
+/*
+ * Arduino Heart Rate Analysis Toolbox - ESP32 Dual Core + Mosquitto MQTT
+ */
+
+#include <Wire.h>              
+#include "MAX30105.h"          
+#include <arduinoFFT.h>        
+#include <WiFi.h>
+#include <PubSubClient.h>      // Library MQTT
+
+MAX30105 particleSensor;
+
+// ====== KONFIGURASI WIFI & MQTT ======
+const char* WIFI_SSID     = "GANTI_DENGAN_SSID_WIFI";
+const char* WIFI_PASSWORD = "GANTI_DENGAN_PASSWORD_WIFI";
+
+const char* MQTT_BROKER   = "192.168.1.10"; // Ganti IP Mosquitto Anda
+const int   MQTT_PORT     = 1883;
+
+// Topik MQTT (bebas disesuaikan)
+const char* TOPIC_HR      = "sensor/wearable-001/hr";
+const char* TOPIC_SPO2    = "sensor/wearable-001/spo2";
+const char* DEVICE_ID     = "WEARABLE-001";
+
+WiFiClient espClient;
+PubSubClient mqtt(espClient);
+
+// ====== FREERTOS TASK & SEMAPHORE ======
+TaskHandle_t TaskSensorHandle;
+TaskHandle_t TaskProcessHandle;
+SemaphoreHandle_t bufferReadySemaphore;
+
+// ====== VARIABEL GLOBAL SENSOR & DATA ======
+// ... [Pindahkan SEMUA deklarasi struct workingDataContainer, hrdataContainer, 
+// dataBuffers, dan variabel SpO2 (es_avgRed, dll) dari kode lama Anda ke sini. 
+// Saya persingkat bagian ini agar fokus ke arsitektur] ...
+
+double es_avgRed = 0, es_avgIR = 0, es_sumRedRMS = 0, es_sumIRRMS = 0;
+int es_sampleCount = 0;
+double currentSpO2 = 99.0;          
+bool fingerOnSensor = false;
+const long IR_FINGER_THRESHOLD = 80000; 
+
+float xv[2] = {0, 0}, yv[2] = {0, 0}, filteredIR = 0;
+
+struct hrdataContainer hrData;
+struct workingDataContainer workingData;
+struct dataBuffer dataBuffers;
+arduinoFFT FFT = arduinoFFT();
+
+// ====== FUNGSI BANTUAN MATEMATIKA & HRV ======
+// (PASTE SEMUA FUNGSI MATEMATIKA DARI KODE LAMA DI SINI)
+// Mulai dari signalQuality(), getMeanInt(), movAvg(), hermite(), detectPeaks(), 
+// FFT_rrList(), switchBuffers() dll. Biarkan sama persis.
+
+// ... [Paste fungsi matematika di sini] ...
+
+// ====== FUNGSI MQTT & PENGIRIMAN ======
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Menghubungkan ke WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Terhubung!");
+}
+
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    Serial.print("Menghubungkan ke Mosquitto...");
+    if (mqtt.connect(DEVICE_ID)) {
+      Serial.println("Terhubung!");
+    } else {
+      Serial.print("Gagal, rc=");
+      Serial.print(mqtt.state());
+      Serial.println(" coba lagi 2 detik.");
+      vTaskDelay(2000 / portTICK_PERIOD_MS); // Gunakan delay FreeRTOS
+    }
+  }
+}
+
+void sendDataMQTT(float bpm, float spo2) {
+  if (!mqtt.connected()) return;
+
+  // Format JSON
+  String payloadHR = "{\"deviceId\":\"" + String(DEVICE_ID) + "\",\"value\":" + String(bpm, 0) + "}";
+  String payloadSpO2 = "{\"deviceId\":\"" + String(DEVICE_ID) + "\",\"value\":" + String(spo2, 1) + "}";
+
+  // Publish ke MQTT
+  mqtt.publish(TOPIC_HR, payloadHR.c_str());
+  mqtt.publish(TOPIC_SPO2, payloadSpO2.c_str());
+  
+  Serial.println("[MQTT] Data terkirim!");
+}
+
+void processData(struct workingDataContainer &workingData, struct hrdataContainer &hrData) {
+  // 1. Jalankan proses matematika
+  preProcessor(workingData);
+  hrProcessor(workingData, hrData);
+
+  // 2. Kalkulasi SpO2
+  if (es_sampleCount > 0) {
+    double rmsRed = sqrt(es_sumRedRMS / es_sampleCount);
+    double rmsIR  = sqrt(es_sumIRRMS  / es_sampleCount);
+    double R = (rmsRed / es_avgRed) / (rmsIR / es_avgIR);
+    double spo2Calc = 104.0 - (17.0 * R); 
+    
+    if (spo2Calc > 100.0) spo2Calc = 100.0;
+    if (spo2Calc < 0) spo2Calc = 0;
+    currentSpO2 = spo2Calc;
+    
+    es_sumRedRMS = 0; es_sumIRRMS = 0; es_sampleCount = 0;
+  }
+
+  // 3. Validasi & Pengiriman
+  if (!fingerOnSensor || hrData.confidenceLevel == 0) {
+    Serial.println("No finger / low signal");
+    return;
+  }
+
+  float bpmValue  = hrData.bpm[hrData.prevLoc];
+  float spo2Value = (float)currentSpO2;
+
+  Serial.printf("BPM: %.0f | SpO2: %.2f %%\n", bpmValue, spo2Value);
+  
+  // Kirim via MQTT (bukan HTTP lagi)
+  sendDataMQTT(bpmValue, spo2Value);
+}
+
+
+// ====== TASK 0: BACA SENSOR NON-STOP (CORE 0) ======
+void TaskSensor(void *pvParameters) {
+  Serial.print("Task Sensor berjalan di Core: ");
+  Serial.println(xPortGetCoreID());
+
+  for (;;) { // Loop abadi FreeRTOS
+    particleSensor.check(); 
+
+    while (particleSensor.available()) {
+      long rawIR  = particleSensor.getFIFOIR();
+      long rawRed = particleSensor.getFIFORed();
+      particleSensor.nextSample(); 
+
+      // Deteksi Jari & SpO2 Ac/Dc calculation
+      if (rawIR > IR_FINGER_THRESHOLD) {
+        fingerOnSensor = true;
+        es_avgRed = (0.95 * es_avgRed) + (0.05 * (double)rawRed);
+        es_avgIR  = (0.95 * es_avgIR)  + (0.05 * (double)rawIR);
+        double acRed = (double)rawRed - es_avgRed;
+        double acIR  = (double)rawIR  - es_avgIR;
+        es_sumRedRMS += (acRed * acRed);
+        es_sumIRRMS  += (acIR * acIR);
+        es_sampleCount++;
+      } else {
+        fingerOnSensor = false;
+      }
+
+      // Filter PPG
+      xv[0] = xv[1]; xv[1] = (float)rawIR;
+      yv[0] = yv[1]; yv[1] = (xv[1] - xv[0]) + (0.969 * yv[0]);
+      filteredIR = (0.7 * -yv[1]) + (0.3 * filteredIR);
+      long finalValue = (long)filteredIR;
+
+      // Simpan ke Buffer
+      if (dataBuffers.bufferID == 0) {
+        dataBuffers.dataBuffer0[dataBuffers.bufferCounter] = finalValue;
+      } else {
+        dataBuffers.dataBuffer1[dataBuffers.bufferCounter] = finalValue;
+      }
+      dataBuffers.bufferCounter++;
+
+      // JIKA BUFFER PENUH (5 detik @100Hz)
+      if (dataBuffers.bufferCounter >= workingData.datalen) {
+        switchBuffers(dataBuffers, workingData);
+        dataBuffers.bufferCounter = 0;
+        
+        // Beri sinyal (tongkat estafet) ke Core 1 bahwa data siap diproses
+        xSemaphoreGive(bufferReadySemaphore);
+      }
+    }
+    // Istirahat sangat sebentar agar watchdog timer (WDT) tidak marah
+    vTaskDelay(5 / portTICK_PERIOD_MS); 
+  }
+}
+
+
+// ====== TASK 1: PROSES DATA & KIRIM MQTT (CORE 1) ======
+void TaskProcess(void *pvParameters) {
+  Serial.print("Task Proses & MQTT berjalan di Core: ");
+  Serial.println(xPortGetCoreID());
+
+  for (;;) {
+    // Jaga koneksi MQTT tetap hidup
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!mqtt.connected()) reconnectMQTT();
+      mqtt.loop();
+    }
+
+    // Menunggu sinyal (semaphore) dari Core 0
+    // portMAX_DELAY artinya task ini "tidur" dan tidak makan CPU sampai sinyal datang
+    if (xSemaphoreTake(bufferReadySemaphore, portMAX_DELAY) == pdTRUE) {
+      // Sinyal diterima! Ada 500 data baru yang siap dihitung
+      processData(workingData, hrData); 
+    }
+  }
+}
+
+
+// ====== SETUP (HANYA UNTUK INISIALISASI) ======
+void setup() {
+  Serial.begin(115200); 
+  delay(2000);
+
+  connectWiFi();
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX3010x tidak ditemukan!");
+    while (1);
+  }
+
+  // Konfigurasi Sensor (Diubah menjadi 100Hz agar akurat)
+  particleSensor.setup(150, 4, 2, 100, 411, 16384); 
+  
+  // Buat Semaphore (tongkat estafet antar Core)
+  bufferReadySemaphore = xSemaphoreCreateBinary();
+
+  // Jalankan TaskSensor di Core 0
+  xTaskCreatePinnedToCore(
+    TaskSensor, "SensorTask", 10000, NULL, 1, &TaskSensorHandle, 0
+  );
+
+  // Jalankan TaskProcess di Core 1
+  xTaskCreatePinnedToCore(
+    TaskProcess, "ProcessTask", 10000, NULL, 1, &TaskProcessHandle, 1
+  );
+
+  Serial.println("Sistem RTOS Siap!");
+}
+
+// ====== LOOP KOSONG ======
+void loop() {
+  // Dalam FreeRTOS, loop bawaan Arduino tidak lagi digunakan.
+  // Semua pekerjaan sudah ditangani oleh TaskSensor dan TaskProcess.
+  vTaskDelete(NULL); 
+}
