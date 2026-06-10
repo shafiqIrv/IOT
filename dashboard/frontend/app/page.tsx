@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   LineChart,
   Line,
@@ -10,9 +10,38 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from 'recharts';
+
+interface LiveSample {
+  ts: number;
+  hr: number | null;
+  spo2: number | null;
+  rr: number | null;
+  fingerDetected: boolean;
+  confidence: number;
+}
+
+interface AnalyticsData {
+  latestEpoch: {
+    hrMean: number | null;
+    hrMin: number | null;
+    hrMax: number | null;
+    spo2Mean: number | null;
+    spo2Min: number | null;
+    spo2Max: number | null;
+    hrvRmssd: number | null;
+    hrvSdnn: number | null;
+    rrMean: number | null;
+    quality: number | null;
+    lastUpdate: string;
+  } | null;
+  ahi: { value: number | null; severity: string | null; eventsCount: number; sleepHours: number | null };
+  odi: { value: number | null; severity: string | null; eventsCount: number; sleepHours: number | null };
+  warnings: { metric: string; level: string; message: string; value: number }[];
+  trend: { time: string; hr: number | null; spo2: number | null; rr: number | null; hrv_rmssd: number | null; hrv_sdnn: number | null }[];
+  sleepHistory: { time: string; isSleeping: number }[];
+}
 
 function SeverityBadge({ severity }: { severity: string | null }) {
   if (!severity) return null;
@@ -23,76 +52,75 @@ function SeverityBadge({ severity }: { severity: string | null }) {
     Berat: 'bg-red-50 text-red-700 border-red-200',
   };
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full border ${styles[severity] || 'bg-neutral-50 text-neutral-600 border-neutral-200'}`}
-    >
+    <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full border ${styles[severity] || 'bg-neutral-50 text-neutral-600 border-neutral-200'}`}>
       {severity}
     </span>
   );
 }
 
-function StatusDot({ active }: { active: boolean }) {
-  return (
-    <span
-      className={`inline-block w-2 h-2 rounded-full ${active ? 'bg-green-500' : 'bg-neutral-300'}`}
-    />
-  );
+function StatusDot({ active, color }: { active: boolean; color?: string }) {
+  const bg = active ? (color || 'bg-green-500') : 'bg-neutral-300';
+  return <span className={`inline-block w-2 h-2 rounded-full ${bg} ${active ? 'animate-pulse' : ''}`} />;
 }
 
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4000';
+const LIVE_BUFFER_SIZE = 20;
+
 export default function Dashboard() {
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [showHrv, setShowHrv] = useState(false);
+  const [liveBuffer, setLiveBuffer] = useState<LiveSample[]>([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
-  const fetchData = async () => {
-    try {
-      const response = await fetch('/api/data');
-      if (response.ok) {
-        const result = await response.json();
-        setData(result);
-      }
-    } catch (error) {
-      console.error('Gagal mengambil data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // WebSocket connection for live data
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
+    function connect() {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => setWsConnected(true);
+      ws.onclose = () => {
+        setWsConnected(false);
+        setTimeout(connect, 3000);
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = (event) => {
+        try {
+          const sample: LiveSample = JSON.parse(event.data);
+          setLiveBuffer((prev) => [...prev.slice(-(LIVE_BUFFER_SIZE - 1)), sample]);
+        } catch { /* ignore parse errors */ }
+      };
+    }
+    connect();
+    return () => { wsRef.current?.close(); };
   }, []);
 
-  if (loading && !data) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center">
-        <div className="w-5 h-5 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mb-4" />
-        <p className="text-sm text-neutral-500 font-mono">Menghubungkan ke database...</p>
-      </div>
-    );
-  }
+  // Analytics polling
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const res = await fetch('/api/analytics');
+      if (res.ok) {
+        setAnalytics(await res.json());
+      }
+    } catch { /* silent */ }
+  }, []);
 
-  if (!data || data.error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="border border-dashed border-neutral-300 rounded-lg p-10 text-center max-w-md">
-          <div className="w-10 h-10 mx-auto mb-4 border border-dashed border-orange-300 rounded-full flex items-center justify-center">
-            <span className="text-orange-500 text-lg">!</span>
-          </div>
-          <h2 className="text-lg font-semibold text-neutral-900 mb-2">Data Belum Tersedia</h2>
-          <p className="text-sm text-neutral-500">
-            Pastikan ESP32 sudah mengirimkan data melalui MQTT.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    fetchAnalytics();
+    const interval = setInterval(fetchAnalytics, 10000);
+    return () => clearInterval(interval);
+  }, [fetchAnalytics]);
 
-  const { latest, history, sleepHistory, ahi, odi, warnings } = data;
-  const hrv = latest.hrv || {};
-  const hasCritical = warnings?.some((w: any) => w.level === 'critical');
-  const hasWarning = warnings?.length > 0;
+  const latestLive = liveBuffer[liveBuffer.length - 1] || null;
+  const sparkData = liveBuffer.map((s, i) => ({
+    idx: i,
+    hr: s.hr,
+    spo2: s.spo2,
+    rr: s.rr,
+  }));
+
+  const hasCritical = analytics?.warnings?.some((w) => w.level === 'critical');
+  const hasWarning = (analytics?.warnings?.length || 0) > 0;
 
   return (
     <div className="min-h-screen p-6 md:p-10">
@@ -104,27 +132,36 @@ export default function Dashboard() {
               Pemantauan Pasien Real-time
             </h1>
             <p className="text-sm text-neutral-500 mt-2 font-mono">
-              Edge AI &middot; Sleep Apnea Detection System
+              Edge AI &middot; Dual-Stream Sleep Apnea Monitoring
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono border border-dashed border-neutral-200 rounded-md px-3 py-2">
-            <StatusDot active={true} />
-            <span>Live &middot; {latest.lastUpdate}</span>
+          <div className="flex items-center gap-3 text-xs text-neutral-500 font-mono border border-dashed border-neutral-200 rounded-md px-3 py-2">
+            <div className="flex items-center gap-1.5">
+              <StatusDot active={wsConnected} />
+              <span>{wsConnected ? 'WebSocket Live' : 'Disconnected'}</span>
+            </div>
+            {latestLive && (
+              <span className="text-neutral-300">|</span>
+            )}
+            {latestLive && (
+              <div className="flex items-center gap-1.5">
+                <StatusDot active={latestLive.fingerDetected} color={latestLive.fingerDetected ? 'bg-green-500' : 'bg-orange-400'} />
+                <span>{latestLive.fingerDetected ? 'Finger OK' : 'No finger'}</span>
+              </div>
+            )}
           </div>
         </header>
 
         {/* Warning Banner */}
-        {hasWarning && (
-          <div
-            className={`mb-6 border border-dashed rounded-lg p-4 ${hasCritical ? 'border-red-300 bg-red-50/50 pulse-border' : 'border-orange-300 bg-orange-50/50'}`}
-          >
+        {hasWarning && analytics && (
+          <div className={`mb-6 border border-dashed rounded-lg p-4 ${hasCritical ? 'border-red-300 bg-red-50/50 pulse-border' : 'border-orange-300 bg-orange-50/50'}`}>
             <div className="flex items-center gap-2 mb-2">
               <span className={`text-xs font-mono uppercase tracking-wider ${hasCritical ? 'text-red-600' : 'text-orange-600'}`}>
                 {hasCritical ? 'CRITICAL' : 'WARNING'}
               </span>
             </div>
             <div className="space-y-1">
-              {warnings.map((w: any, i: number) => (
+              {analytics.warnings.map((w, i) => (
                 <p key={i} className={`text-sm font-mono ${w.level === 'critical' ? 'text-red-700' : 'text-orange-700'}`}>
                   {w.message}
                 </p>
@@ -133,271 +170,191 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Hero Vitals */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              Heart Rate
-            </p>
-            <p className="font-mono text-3xl font-bold text-neutral-900">
-              {latest.heartRate ?? '--'}
-              <span className="text-sm text-neutral-400 ml-1">BPM</span>
-            </p>
-            <div className="mt-3">
-              <SeverityBadge severity={latest.heartRate ? (latest.heartRate >= 50 && latest.heartRate <= 100 ? 'Normal' : 'Ringan') : null} />
-            </div>
+        {/* ===== LIVE PANEL ===== */}
+        <section className="mb-8">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs uppercase tracking-wider text-neutral-400 font-medium">Live Monitor</span>
+            <span className="text-xs font-mono text-neutral-300">(last {LIVE_BUFFER_SIZE}s)</span>
           </div>
 
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              SpO2
-            </p>
-            <p className="font-mono text-3xl font-bold text-neutral-900">
-              {latest.spo2 ?? '--'}
-              <span className="text-sm text-neutral-400 ml-1">%</span>
-            </p>
-            <div className="mt-3">
-              <SeverityBadge severity={latest.spo2 ? (latest.spo2 >= 92 ? 'Normal' : latest.spo2 >= 88 ? 'Ringan' : 'Berat') : null} />
-            </div>
-          </div>
-
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              Respiratory Rate
-            </p>
-            <p className="font-mono text-3xl font-bold text-neutral-900">
-              {latest.respiratoryRate ?? '--'}
-              <span className="text-sm text-neutral-400 ml-1">RPM</span>
-            </p>
-            <div className="mt-3">
-              <SeverityBadge severity={latest.respiratoryRate ? 'Normal' : null} />
-            </div>
-          </div>
-        </div>
-
-        {/* Bento Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-          {/* AHI */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              AHI (Apnea-Hypopnea Index)
-            </p>
-            {ahi.value !== null ? (
-              <>
-                <p className="font-mono text-2xl font-bold text-neutral-900">
-                  {ahi.value}
-                  <span className="text-sm text-neutral-400 ml-1">/jam</span>
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <SeverityBadge severity={ahi.severity} />
-                </div>
-                <p className="text-xs text-neutral-400 font-mono mt-2">
-                  {ahi.eventsCount} events &middot; {ahi.sleepHours} jam tidur
-                </p>
-              </>
-            ) : (
-              <p className="font-mono text-sm text-neutral-400 mt-1">Menunggu data tidur...</p>
-            )}
-          </div>
-
-          {/* ODI */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              ODI (Oxygen Desaturation Index)
-            </p>
-            {odi.value !== null ? (
-              <>
-                <p className="font-mono text-2xl font-bold text-neutral-900">
-                  {odi.value}
-                  <span className="text-sm text-neutral-400 ml-1">/jam</span>
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <SeverityBadge severity={odi.severity} />
-                </div>
-                <p className="text-xs text-neutral-400 font-mono mt-2">
-                  {odi.eventsCount} desaturasi &middot; {odi.sleepHours} jam tidur
-                </p>
-              </>
-            ) : (
-              <p className="font-mono text-sm text-neutral-400 mt-1">Menunggu data tidur...</p>
-            )}
-          </div>
-
-          {/* Status Vital */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              Status Vital
-            </p>
-            <p className={`font-mono text-2xl font-bold ${latest.isCritical ? 'text-red-600' : 'text-green-700'}`}>
-              {latest.isCritical ? 'Kritis' : 'Normal'}
-            </p>
-            <div className="mt-2">
-              <SeverityBadge severity={latest.isCritical ? 'Berat' : 'Normal'} />
-            </div>
-          </div>
-
-          {/* Sleep Status */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              Status Tidur
-            </p>
-            <p className="font-mono text-2xl font-bold text-neutral-900">
-              {latest.sleepStatus}
-            </p>
-            <p className="text-xs text-neutral-400 font-mono mt-2">
-              Probabilitas: {latest.sleepProb}%
-            </p>
-          </div>
-
-          {/* Apnea Detection */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">
-              Deteksi Apnea
-            </p>
-            <p className={`font-mono text-2xl font-bold ${latest.apneaWarning ? 'text-red-600' : 'text-green-700'}`}>
-              {latest.apneaWarning ? 'Terdeteksi' : 'Aman'}
-            </p>
-            {latest.apneaWarning && (
-              <p className="text-xs text-red-500 font-mono mt-2">
-                Probabilitas: {latest.apneaProb}%
+          {/* Live Vitals Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+              <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">Heart Rate</p>
+              <p className="font-mono text-3xl font-bold text-neutral-900">
+                {latestLive?.hr ?? '--'}
+                <span className="text-sm text-neutral-400 ml-1">BPM</span>
               </p>
-            )}
-            <div className="mt-2">
-              <SeverityBadge severity={latest.apneaWarning ? 'Berat' : 'Normal'} />
+            </div>
+            <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+              <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">SpO2</p>
+              <p className="font-mono text-3xl font-bold text-neutral-900">
+                {latestLive?.spo2 ?? '--'}
+                <span className="text-sm text-neutral-400 ml-1">%</span>
+              </p>
+            </div>
+            <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+              <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">Respiratory Rate</p>
+              <p className="font-mono text-3xl font-bold text-neutral-900">
+                {latestLive?.rr ?? '--'}
+                <span className="text-sm text-neutral-400 ml-1">RPM</span>
+              </p>
             </div>
           </div>
 
-          {/* HRV Summary */}
-          <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium">
-                HRV
-              </p>
-              <button
-                type="button"
-                onClick={() => setShowHrv((v) => !v)}
-                className="text-xs font-mono text-neutral-500 hover:text-neutral-900 transition-colors"
-              >
-                {showHrv ? 'Sembunyikan' : 'Detail'}
-              </button>
+          {/* Live Sparklines */}
+          {sparkData.length > 1 && (
+            <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+              <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-4">Rolling Sparkline</p>
+              <div className="h-40 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={sparkData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                    <YAxis yAxisId="hr" stroke="#a3a3a3" fontSize={10} tickLine={false} axisLine={false} domain={['dataMin - 5', 'dataMax + 5']} width={30} />
+                    <YAxis yAxisId="spo2" orientation="right" stroke="#a3a3a3" fontSize={10} tickLine={false} axisLine={false} domain={[88, 100]} width={30} />
+                    <Tooltip
+                      contentStyle={{ borderRadius: '6px', border: '1px dashed #e5e5e5', boxShadow: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }}
+                    />
+                    <Line yAxisId="hr" type="monotone" dataKey="hr" name="HR" stroke="#0a0a0a" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line yAxisId="spo2" type="monotone" dataKey="spo2" name="SpO2" stroke="#737373" strokeWidth={2} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <p className="text-xs text-neutral-400">SDNN</p>
-                <p className="font-mono text-lg font-bold text-neutral-900">{hrv.sdnn ?? '--'}<span className="text-xs text-neutral-400 ml-0.5">ms</span></p>
+          )}
+
+          {!wsConnected && liveBuffer.length === 0 && (
+            <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center">
+              <div className="w-5 h-5 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mx-auto mb-3" />
+              <p className="text-sm text-neutral-500 font-mono">Menghubungkan WebSocket...</p>
+            </div>
+          )}
+        </section>
+
+        {/* ===== ANALYTICS PANEL ===== */}
+        <section>
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs uppercase tracking-wider text-neutral-400 font-medium">Analytics</span>
+            <span className="text-xs font-mono text-neutral-300">(60s epochs, polls every 10s)</span>
+          </div>
+
+          {analytics ? (
+            <>
+              {/* AHI / ODI / Latest Epoch */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+                {/* AHI */}
+                <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+                  <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">AHI (Apnea-Hypopnea Index)</p>
+                  {analytics.ahi.value !== null ? (
+                    <>
+                      <p className="font-mono text-2xl font-bold text-neutral-900">
+                        {analytics.ahi.value}<span className="text-sm text-neutral-400 ml-1">/jam</span>
+                      </p>
+                      <div className="mt-2"><SeverityBadge severity={analytics.ahi.severity} /></div>
+                      <p className="text-xs text-neutral-400 font-mono mt-2">
+                        {analytics.ahi.eventsCount} events &middot; {analytics.ahi.sleepHours} jam tidur
+                      </p>
+                    </>
+                  ) : (
+                    <p className="font-mono text-sm text-neutral-400 mt-1">Menunggu data tidur...</p>
+                  )}
+                </div>
+
+                {/* ODI */}
+                <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+                  <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">ODI (Oxygen Desaturation Index)</p>
+                  {analytics.odi.value !== null ? (
+                    <>
+                      <p className="font-mono text-2xl font-bold text-neutral-900">
+                        {analytics.odi.value}<span className="text-sm text-neutral-400 ml-1">/jam</span>
+                      </p>
+                      <div className="mt-2"><SeverityBadge severity={analytics.odi.severity} /></div>
+                      <p className="text-xs text-neutral-400 font-mono mt-2">
+                        {analytics.odi.eventsCount} desaturasi &middot; {analytics.odi.sleepHours} jam tidur
+                      </p>
+                    </>
+                  ) : (
+                    <p className="font-mono text-sm text-neutral-400 mt-1">Menunggu data tidur...</p>
+                  )}
+                </div>
+
+                {/* Latest Epoch Summary */}
+                <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+                  <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-2">Epoch Terakhir</p>
+                  {analytics.latestEpoch ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <p className="text-xs text-neutral-400">HR (avg)</p>
+                        <p className="font-mono text-lg font-bold text-neutral-900">{analytics.latestEpoch.hrMean ?? '--'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-neutral-400">SpO2 (avg)</p>
+                        <p className="font-mono text-lg font-bold text-neutral-900">{analytics.latestEpoch.spo2Mean ?? '--'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-neutral-400">HRV RMSSD</p>
+                        <p className="font-mono text-lg font-bold text-neutral-900">{analytics.latestEpoch.hrvRmssd ?? '--'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-neutral-400">Quality</p>
+                        <p className="font-mono text-lg font-bold text-neutral-900">{analytics.latestEpoch.quality ?? '--'}%</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="font-mono text-sm text-neutral-400 mt-1">Belum ada epoch...</p>
+                  )}
+                </div>
               </div>
-              <div>
-                <p className="text-xs text-neutral-400">RMSSD</p>
-                <p className="font-mono text-lg font-bold text-neutral-900">{hrv.rmssd ?? '--'}<span className="text-xs text-neutral-400 ml-0.5">ms</span></p>
-              </div>
-              {showHrv && (
-                <>
-                  <div>
-                    <p className="text-xs text-neutral-400">pNN50</p>
-                    <p className="font-mono text-lg font-bold text-neutral-900">{hrv.pnn50 ?? '--'}<span className="text-xs text-neutral-400 ml-0.5">%</span></p>
+
+              {/* Trend Chart */}
+              {analytics.trend.length > 1 && (
+                <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white mb-4">
+                  <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-6">Trend HR &amp; SpO2 (per epoch)</p>
+                  <div className="h-64 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={analytics.trend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
+                        <XAxis dataKey="time" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} fontFamily="var(--font-geist-mono)" />
+                        <YAxis yAxisId="left" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} domain={['dataMin - 5', 'dataMax + 5']} />
+                        <YAxis yAxisId="right" orientation="right" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} domain={[88, 100]} />
+                        <Tooltip contentStyle={{ borderRadius: '6px', border: '1px dashed #e5e5e5', boxShadow: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }} />
+                        <Line yAxisId="left" type="monotone" dataKey="hr" name="HR (BPM)" stroke="#0a0a0a" strokeWidth={2} dot={false} isAnimationActive={false} />
+                        <Line yAxisId="right" type="monotone" dataKey="spo2" name="SpO2 (%)" stroke="#737373" strokeWidth={2} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-                  <div>
-                    <p className="text-xs text-neutral-400">Mean RR</p>
-                    <p className="font-mono text-lg font-bold text-neutral-900">{hrv.meanRR ?? '--'}<span className="text-xs text-neutral-400 ml-0.5">ms</span></p>
-                  </div>
-                </>
+                </div>
               )}
+
+              {/* Sleep History */}
+              {analytics.sleepHistory.length > 0 && (
+                <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
+                  <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-6">Riwayat Status Tidur</p>
+                  <div className="h-44 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={analytics.sleepHistory} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
+                        <XAxis dataKey="time" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} fontFamily="var(--font-geist-mono)" />
+                        <YAxis stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} domain={[0, 1]} ticks={[0, 1]} tickFormatter={(v) => (v === 1 ? 'Tidur' : 'Bangun')} width={50} fontFamily="var(--font-geist-mono)" />
+                        <Tooltip contentStyle={{ borderRadius: '6px', border: '1px dashed #e5e5e5', boxShadow: 'none', fontFamily: 'var(--font-geist-mono)', fontSize: '11px' }} formatter={(v) => [Number(v) === 1 ? 'Tidur' : 'Bangun', 'Status']} />
+                        <Area type="stepAfter" dataKey="isSleeping" name="Status Tidur" stroke="#0a0a0a" strokeWidth={1.5} fill="#fafafa" isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="border border-dashed border-neutral-300 rounded-lg p-8 text-center">
+              <div className="w-5 h-5 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mx-auto mb-3" />
+              <p className="text-sm text-neutral-500 font-mono">Memuat data analytics...</p>
             </div>
-          </div>
-        </div>
-
-        {/* Charts */}
-        <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white mb-4">
-          <div className="flex items-center justify-between mb-6">
-            <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium">
-              Riwayat HR &amp; SpO2{showHrv ? ' & HRV' : ''}
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowHrv((v) => !v)}
-              className={`text-xs font-mono px-2 py-1 rounded border border-dashed transition-colors ${showHrv ? 'border-green-300 text-green-700 bg-green-50' : 'border-neutral-200 text-neutral-500'}`}
-            >
-              HRV {showHrv ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={history} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
-                <XAxis dataKey="time" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} fontFamily="var(--font-geist-mono)" />
-                <YAxis yAxisId="left" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} domain={['dataMin - 5', 'dataMax + 5']} />
-                <YAxis yAxisId="right" orientation="right" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} domain={[88, 100]} />
-                {showHrv && (
-                  <YAxis yAxisId="hrv" orientation="right" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} width={30} domain={['dataMin - 5', 'dataMax + 5']} />
-                )}
-                <Tooltip
-                  contentStyle={{
-                    borderRadius: '6px',
-                    border: '1px dashed #e5e5e5',
-                    boxShadow: 'none',
-                    fontFamily: 'var(--font-geist-mono)',
-                    fontSize: '11px',
-                  }}
-                />
-                <Legend wrapperStyle={{ paddingTop: '16px', fontSize: '11px', fontFamily: 'var(--font-geist-mono)' }} />
-                <Line yAxisId="left" type="monotone" dataKey="hr" name="HR (BPM)" stroke="#0a0a0a" strokeWidth={2} dot={false} isAnimationActive={false} />
-                <Line yAxisId="right" type="monotone" dataKey="spo2" name="SpO2 (%)" stroke="#737373" strokeWidth={2} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
-                {showHrv && (
-                  <Line yAxisId="hrv" type="monotone" dataKey="rmssd" name="RMSSD (ms)" stroke="#16a34a" strokeWidth={1.5} dot={false} isAnimationActive={false} />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="border border-dashed border-neutral-200 rounded-lg p-6 bg-white">
-          <p className="text-xs uppercase tracking-wider text-neutral-400 font-medium mb-6">
-            Riwayat Status Tidur
-          </p>
-          <div className="h-52 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={sleepHistory} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
-                <XAxis dataKey="time" stroke="#a3a3a3" fontSize={11} tickLine={false} axisLine={false} fontFamily="var(--font-geist-mono)" />
-                <YAxis
-                  stroke="#a3a3a3"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={false}
-                  domain={[0, 1]}
-                  ticks={[0, 1]}
-                  tickFormatter={(v) => (v === 1 ? 'Tidur' : 'Bangun')}
-                  width={50}
-                  fontFamily="var(--font-geist-mono)"
-                />
-                <Tooltip
-                  contentStyle={{
-                    borderRadius: '6px',
-                    border: '1px dashed #e5e5e5',
-                    boxShadow: 'none',
-                    fontFamily: 'var(--font-geist-mono)',
-                    fontSize: '11px',
-                  }}
-                  formatter={(v) => [Number(v) === 1 ? 'Tidur' : 'Bangun', 'Status']}
-                />
-                <Area
-                  type="stepAfter"
-                  dataKey="isSleeping"
-                  name="Status Tidur"
-                  stroke="#0a0a0a"
-                  strokeWidth={1.5}
-                  fill="#fafafa"
-                  isAnimationActive={false}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+          )}
+        </section>
 
         {/* Footer */}
         <footer className="mt-8 text-center">
           <p className="text-xs text-neutral-400 font-mono">
-            Edge AI &middot; IoT Sleep Apnea Monitoring &middot; MAX30102 + ESP32-S3
+            Dual-Stream Architecture &middot; Live 1s + Epoch 60s &middot; MAX30102 + ESP32-S3
           </p>
         </footer>
       </div>

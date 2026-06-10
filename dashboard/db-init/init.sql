@@ -1,4 +1,4 @@
--- Tabel untuk data vitals (metrics dari ESP32 edge)
+-- Legacy vitals table (kept for backward compat, no longer inserted)
 CREATE TABLE IF NOT EXISTS patient_vitals (
     id SERIAL PRIMARY KEY,
     heart_rate REAL NOT NULL,
@@ -8,8 +8,35 @@ CREATE TABLE IF NOT EXISTS patient_vitals (
     hrv_sdnn REAL,
     hrv_rmssd REAL,
     hrv_pnn50 REAL,
-    anomaly_status VARCHAR(20), -- Normal / Kritis (diturunkan di backend dari ambang batas)
+    anomaly_status VARCHAR(20),
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 60-second epoch summaries from dual-stream architecture
+CREATE TABLE IF NOT EXISTS vitals_epochs (
+    id SERIAL PRIMARY KEY,
+    device_id VARCHAR(50) NOT NULL,
+    epoch_start TIMESTAMP NOT NULL,
+    epoch_end TIMESTAMP NOT NULL,
+    hr_mean REAL,
+    hr_min REAL,
+    hr_max REAL,
+    hr_std REAL,
+    spo2_mean REAL,
+    spo2_min REAL,
+    spo2_max REAL,
+    spo2_std REAL,
+    spo2_desat_count INT DEFAULT 0,
+    hrv_sdnn REAL,
+    hrv_rmssd REAL,
+    hrv_pnn50 REAL,
+    hrv_mean_rr REAL,
+    respiratory_rate_mean REAL,
+    valid_samples INT,
+    total_samples INT,
+    signal_quality_mean REAL,
+    finger_detected_pct REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Tabel untuk data model Apnea (inference dari ESP32 edge)

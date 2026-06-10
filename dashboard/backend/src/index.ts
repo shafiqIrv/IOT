@@ -1,7 +1,8 @@
 import * as mqtt from 'mqtt';
 import { Pool } from 'pg';
+import { createServer } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 
-// Konfigurasi Database PostgreSQL
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: parseInt(process.env.DB_PORT || '5432'),
@@ -10,89 +11,125 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
-// Koneksi ke MQTT Broker
 const mqttUrl = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
 const client = mqtt.connect(mqttUrl);
 
-// Topik nyata dari ESP32 edge (metrics + apnea) dan cloud sleep service
-const TOPIC_METRICS = 'sensor/+/metrics';
+const TOPIC_LIVE = 'sensor/+/live';
+const TOPIC_EPOCH = 'sensor/+/epoch';
 const TOPIC_APNEA = 'sensor/+/inference/apnea';
 const TOPIC_SLEEP = 'sensor/+/inference/sleep';
 
+// WebSocket server on port 4000
+const httpServer = createServer();
+const wss = new WebSocketServer({ server: httpServer });
+
+wss.on('connection', (ws) => {
+  console.log('[WS] Client terhubung, total:', wss.clients.size);
+  ws.on('close', () => {
+    console.log('[WS] Client terputus, total:', wss.clients.size);
+  });
+});
+
+httpServer.listen(4000, () => {
+  console.log('[WS] Server berjalan di port 4000');
+});
+
 client.on('connect', () => {
   console.log('Terhubung ke MQTT Broker');
-  client.subscribe([TOPIC_METRICS, TOPIC_APNEA, TOPIC_SLEEP], (err) => {
+  client.subscribe([TOPIC_LIVE, TOPIC_EPOCH, TOPIC_APNEA, TOPIC_SLEEP], (err) => {
     if (!err) {
-      console.log(`Subscribed ke topik: ${TOPIC_METRICS}, ${TOPIC_APNEA}, ${TOPIC_SLEEP}`);
+      console.log(`Subscribed: ${TOPIC_LIVE}, ${TOPIC_EPOCH}, ${TOPIC_APNEA}, ${TOPIC_SLEEP}`);
     } else {
       console.error('Gagal subscribe:', err);
     }
   });
 });
 
-// Ambil angka jika valid (bukan null/undefined/NaN), selain itu kembalikan null
 const num = (value: unknown): number | null => {
   if (value === null || value === undefined) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 };
 
-// Turunkan status vital dari ambang batas HR/SpO2
-const deriveAnomaly = (hr: number, spo2: number): string => {
-  if (spo2 < 92 || hr < 50 || hr > 120) return 'Kritis';
-  return 'Normal';
-};
-
 const isMatch = (topic: string, suffix: string): boolean => topic.endsWith(suffix);
+
+function cleanPayload(message: Buffer | string): string {
+  const raw = Buffer.isBuffer(message) ? message.toString('utf8') : String(message);
+  return raw.replace(/^\uFEFF/, '').replace(/\0/g, '').trim();
+}
 
 client.on('message', async (topic, message) => {
   try {
-    const raw = Buffer.isBuffer(message)
-      ? message.toString('utf8')
-      : String(message);
+    const cleaned = cleanPayload(message);
+    if (!cleaned) return;
 
-    // Strip UTF-8 BOM and null bytes that ESP32/PubSubClient may inject
-    const cleaned = raw.replace(/^\uFEFF/, '').replace(/\0/g, '').trim();
-
-    if (!cleaned) {
-      console.warn('[SKIP] Payload kosong pada topik:', topic);
+    // Live data: relay to WebSocket clients, no DB write
+    if (isMatch(topic, '/live')) {
+      const payload = cleaned;
+      wss.clients.forEach((ws) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(payload);
+        }
+      });
       return;
     }
 
     const data = JSON.parse(cleaned);
 
-    // 1. Metrics (HR, SpO2, RR, HRV) -> patient_vitals
-    if (isMatch(topic, '/metrics')) {
-      const hr = num(data.hr);
-      const spo2 = num(data.spo2);
-
-      // Lewati frame tanpa jari terdeteksi / sinyal tidak valid
-      if (hr === null || spo2 === null) {
-        return;
-      }
-
+    // Epoch data: store in vitals_epochs
+    if (isMatch(topic, '/epoch')) {
+      const hr = data.hr || {};
+      const spo2 = data.spo2 || {};
       const hrv = data.hrv || {};
+      const rr = data.rr || {};
+      const quality = data.quality || {};
+
+      const epochStart = data.epochStart
+        ? new Date(Number(data.epochStart))
+        : new Date();
+      const epochEnd = data.epochEnd
+        ? new Date(Number(data.epochEnd))
+        : new Date();
+
       const query = `
-        INSERT INTO patient_vitals
-          (heart_rate, spo2, respiratory_rate, hrv_mean_rr, hrv_sdnn, hrv_rmssd, hrv_pnn50, anomaly_status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO vitals_epochs
+          (device_id, epoch_start, epoch_end,
+           hr_mean, hr_min, hr_max, hr_std,
+           spo2_mean, spo2_min, spo2_max, spo2_std, spo2_desat_count,
+           hrv_sdnn, hrv_rmssd, hrv_pnn50, hrv_mean_rr,
+           respiratory_rate_mean,
+           valid_samples, total_samples, signal_quality_mean, finger_detected_pct)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
       `;
       const values = [
-        hr,
-        spo2,
-        num(data.respiratoryRate),
-        num(hrv.meanRR),
+        data.deviceId,
+        epochStart,
+        epochEnd,
+        num(hr.mean),
+        num(hr.min),
+        num(hr.max),
+        num(hr.std),
+        num(spo2.mean),
+        num(spo2.min),
+        num(spo2.max),
+        num(spo2.std),
+        num(spo2.desatCount) ?? 0,
         num(hrv.sdnn),
         num(hrv.rmssd),
         num(hrv.pnn50),
-        deriveAnomaly(hr, spo2),
+        num(hrv.meanRR),
+        num(rr.mean),
+        num(quality.validSamples),
+        num(quality.totalSamples),
+        num(quality.meanConfidence),
+        num(quality.fingerPct),
       ];
       await pool.query(query, values);
-      console.log('[VITALS] Data tersimpan');
+      console.log('[EPOCH] Data tersimpan');
       return;
     }
 
-    // 2. Apnea inference -> apnea_predictions
+    // Apnea inference -> apnea_predictions
     if (isMatch(topic, '/inference/apnea')) {
       if (data.valid !== true) {
         console.log('[APNEA] Frame tidak valid dilewati:', data.status);
@@ -117,7 +154,7 @@ client.on('message', async (topic, message) => {
       return;
     }
 
-    // 3. Sleep inference -> sleep_predictions
+    // Sleep inference -> sleep_predictions
     if (isMatch(topic, '/inference/sleep')) {
       if (data.valid !== true) {
         console.log('[SLEEP] Frame tidak valid dilewati:', data.status);
@@ -143,9 +180,7 @@ client.on('message', async (topic, message) => {
 
     console.log('Topik tidak dikenali:', topic);
   } catch (error) {
-    const rawHex = Buffer.isBuffer(message)
-      ? message.slice(0, 50).toString('hex')
-      : '';
+    const rawHex = Buffer.isBuffer(message) ? message.slice(0, 50).toString('hex') : '';
     const rawPreview = Buffer.isBuffer(message)
       ? message.slice(0, 100).toString('utf8')
       : String(message).slice(0, 100);

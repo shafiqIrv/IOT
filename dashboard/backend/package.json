@@ -14,12 +14,14 @@
   "description": "",
   "dependencies": {
     "mqtt": "^5.15.1",
-    "pg": "^8.21.0"
+    "pg": "^8.21.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/mqtt": "^0.0.34",
     "@types/node": "^25.9.2",
     "@types/pg": "^8.20.0",
+    "@types/ws": "^8.5.13",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
