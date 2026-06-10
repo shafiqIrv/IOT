@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # 1. MQTT Broker (Mosquitto)
+  mqtt:
+    image: eclipse-mosquitto:latest
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    networks:
+      - iot-network
+
+  # 2. Database (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: health_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d # Auto-run skrip SQL
+    networks:
+      - iot-network
+
+  # 3. Backend Service (Node.js)
+  backend:
+    build: ./backend
+    depends_on:
+      - mqtt
+      - db
+    environment:
+      MQTT_BROKER_URL: mqtt://mqtt:1883
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+      DB_NAME: health_db
+    ports:
+      - "4000:4000"
+    networks:
+      - iot-network
+
+  # 4. Frontend Dashboard (Next.js)
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+      - db
+    ports:
+      - "3000:3000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+      DB_NAME: health_db
+    networks:
+      - iot-network
+
+networks:
+  iot-network:
+    driver: bridge
+
+volumes:
+  pgdata:

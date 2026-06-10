@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fafafa;
+  --foreground: #0a0a0a;
+  --card-bg: #ffffff;
+  --border: #e5e5e5;
+  --text-secondary: #737373;
+  --text-muted: #a3a3a3;
+  --accent-green: #16a34a;
+  --accent-orange: #ea580c;
+  --accent-red: #dc2626;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+@keyframes typewriter {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+@keyframes blink-caret {
+  from, to { border-color: transparent; }
+  50% { border-color: #0a0a0a; }
+}
+
+.typewriter {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 2px solid #0a0a0a;
+  animation: typewriter 2s steps(32, end) forwards, blink-caret 0.75s step-end infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--accent-red); }
+  50% { border-color: transparent; }
+}
+
+.pulse-border {
+  animation: pulse-border 1.5s ease-in-out infinite;
+}
