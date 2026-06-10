@@ -1,0 +1,94 @@
+# Unified stack: ESP32 edge (apnea) + cloud sleep model + dashboard
+# Single Mosquitto broker shared by the ESP32, the cloud sleep service, and the backend.
+# Run from the IOT/ root: docker compose up --build
+services:
+  # 1. MQTT Broker (Mosquitto) — shared by all producers/consumers.
+  #    Port 1883 is published so the real ESP32 on the LAN can connect
+  #    (point MQTT_BROKER in the firmware at this host's LAN IP).
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./dashboard/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks:
+      - iot-network
+
+  # 2. Database (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: health_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./dashboard/db-init:/docker-entrypoint-initdb.d # Auto-run skrip SQL
+    networks:
+      - iot-network
+
+  # 3. Backend Service (Node.js) — subscribes to the real sensor/* topics.
+  backend:
+    build: ./dashboard/backend
+    depends_on:
+      - mqtt
+      - db
+    environment:
+      MQTT_BROKER_URL: mqtt://mqtt:1883
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+      DB_NAME: health_db
+    ports:
+      - "4000:4000"
+    networks:
+      - iot-network
+
+  # 4. Frontend Dashboard (Next.js)
+  frontend:
+    build: ./dashboard/frontend
+    depends_on:
+      - backend
+      - db
+    ports:
+      - "3000:3000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+      DB_NAME: health_db
+    networks:
+      - iot-network
+
+  # 5. Cloud Sleep Detection Service (Python/XGBoost).
+  #    Build context is ./model because the Dockerfile COPYs model artifacts
+  #    relative to the model directory.
+  sleep_detection_service:
+    build:
+      context: ./model
+      dockerfile: cloud/sleep_detection_service/Dockerfile
+    depends_on:
+      - mqtt
+    environment:
+      MQTT_HOST: mqtt
+      MQTT_PORT: "1883"
+      MQTT_SUBSCRIBE_TOPIC: sensor/+/metrics
+      MQTT_PUBLISH_TOPIC_TEMPLATE: sensor/{deviceId}/inference/sleep
+      SLEEP_MODEL_PATH: /models/sleep_detection_binary_model.joblib
+      SLEEP_FEATURE_COLUMNS_PATH: /models/sleep_detection_feature_columns.joblib
+      SLEEP_WINDOW_SEC: "30"
+      SLEEP_MIN_VALID_SAMPLES: "3"
+    networks:
+      - iot-network
+
+networks:
+  iot-network:
+    driver: bridge
+
+volumes:
+  pgdata:
